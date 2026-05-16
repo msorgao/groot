@@ -79,6 +79,8 @@ class VideoDecoder:
         device: Optional[Union[str, torch_device]] = "cpu",
         seek_mode: Literal["exact", "approximate"] = "exact",
     ):
+        self._dimension_order = dimension_order  # 保存维度顺序
+        self._cached_frame_shape = None  # 用于缓存成功解码的帧形状
         allowed_seek_modes = ("exact", "approximate")
         if seek_mode not in allowed_seek_modes:
             raise ValueError(
@@ -137,6 +139,38 @@ class VideoDecoder:
                 end_stream_seconds=100.0,
                 num_frames=self._num_frames,
             )
+    
+    def _get_video_dims(self):
+        """获取视频尺寸，优先使用成功解码的帧形状，其次使用metadata"""
+        if self._cached_frame_shape is not None:
+            # 使用缓存的形状
+            if len(self._cached_frame_shape) == 3:  # 单帧
+                if self._dimension_order == "NCHW":
+                    return self._cached_frame_shape[1], self._cached_frame_shape[2]
+                else:  # NHWC
+                    return self._cached_frame_shape[0], self._cached_frame_shape[1]
+            elif len(self._cached_frame_shape) == 4:  # 批量帧
+                if self._dimension_order == "NCHW":
+                    return self._cached_frame_shape[2], self._cached_frame_shape[3]
+                else:  # NHWC
+                    return self._cached_frame_shape[1], self._cached_frame_shape[2]
+        # fallback 到 metadata
+        return getattr(self.metadata, 'height', 1080), getattr(self.metadata, 'width', 1920)
+    
+    def _create_blank_frame(self, num_frames=1):
+        """创建空白帧，使用正确的尺寸和维度顺序"""
+        import torch
+        height, width = self._get_video_dims()
+        if self._dimension_order == "NCHW":
+            if num_frames == 1:
+                return torch.zeros((3, height, width), dtype=torch.uint8)
+            else:
+                return torch.zeros((num_frames, 3, height, width), dtype=torch.uint8)
+        else:  # NHWC
+            if num_frames == 1:
+                return torch.zeros((height, width, 3), dtype=torch.uint8)
+            else:
+                return torch.zeros((num_frames, height, width, 3), dtype=torch.uint8)
 
     def __len__(self) -> int:
         return self._num_frames
@@ -153,11 +187,11 @@ class VideoDecoder:
 
         try:
             frame_data, *_ = core.get_frame_at_index(self._decoder, frame_index=key)
+            # 缓存成功解码的帧形状
+            if self._cached_frame_shape is None:
+                self._cached_frame_shape = frame_data.shape
         except Exception as e:
-            import torch
-            height = getattr(self.metadata, 'height', 1080)
-            width = getattr(self.metadata, 'width', 1920)
-            frame_data = torch.zeros((3, height, width), dtype=torch.uint8)
+            frame_data = self._create_blank_frame(num_frames=1)
         return frame_data
 
     def _getitem_slice(self, key: slice) -> Tensor:
@@ -171,12 +205,12 @@ class VideoDecoder:
                 stop=stop,
                 step=step,
             )
+            # 缓存成功解码的帧形状
+            if self._cached_frame_shape is None:
+                self._cached_frame_shape = frame_data.shape
         except Exception as e:
-            import torch
             num_frames = max(0, (stop - start + step - 1) // step)
-            height = getattr(self.metadata, 'height', 1080)
-            width = getattr(self.metadata, 'width', 1920)
-            frame_data = torch.zeros((num_frames, 3, height, width), dtype=torch.uint8)
+            frame_data = self._create_blank_frame(num_frames=num_frames)
         return frame_data
 
     def __getitem__(self, key: Union[numbers.Integral, slice]) -> Tensor:
@@ -238,11 +272,12 @@ class VideoDecoder:
             data, pts_seconds, duration_seconds = core.get_frame_at_index(
                 self._decoder, frame_index=index
             )
+            # 缓存成功解码的帧形状
+            if self._cached_frame_shape is None:
+                self._cached_frame_shape = data.shape
         except Exception as e:
             import torch
-            height = getattr(self.metadata, 'height', 1080)
-            width = getattr(self.metadata, 'width', 1920)
-            data = torch.zeros((3, height, width), dtype=torch.uint8)
+            data = self._create_blank_frame(num_frames=1)
             pts_seconds = torch.tensor(0.0, dtype=torch.float32)
             duration_seconds = torch.tensor(0.0, dtype=torch.float32)
         return Frame(
@@ -268,12 +303,13 @@ class VideoDecoder:
             data, pts_seconds, duration_seconds = core.get_frames_at_indices(
                 self._decoder, frame_indices=indices
             )
+            # 缓存成功解码的帧形状
+            if self._cached_frame_shape is None:
+                self._cached_frame_shape = data.shape
         except Exception as e:
             import torch
             num_frames = len(indices)
-            height = getattr(self.metadata, 'height', 1080)
-            width = getattr(self.metadata, 'width', 1920)
-            data = torch.zeros((num_frames, 3, height, width), dtype=torch.uint8)
+            data = self._create_blank_frame(num_frames=num_frames)
             pts_seconds = torch.zeros(num_frames, dtype=torch.float32)
             duration_seconds = torch.zeros(num_frames, dtype=torch.float32)
         return FrameBatch(
@@ -313,12 +349,14 @@ class VideoDecoder:
                 stop=stop,
                 step=step,
             )
+            data, pts_seconds, duration_seconds = frames
+            # 缓存成功解码的帧形状
+            if self._cached_frame_shape is None:
+                self._cached_frame_shape = data.shape
         except Exception as e:
             import torch
             num_frames = max(0, (stop - start + step - 1) // step)
-            height = getattr(self.metadata, 'height', 1080)
-            width = getattr(self.metadata, 'width', 1920)
-            data = torch.zeros((num_frames, 3, height, width), dtype=torch.uint8)
+            data = self._create_blank_frame(num_frames=num_frames)
             pts_seconds = torch.zeros(num_frames, dtype=torch.float32)
             duration_seconds = torch.zeros(num_frames, dtype=torch.float32)
             frames = (data, pts_seconds, duration_seconds)
@@ -352,11 +390,12 @@ class VideoDecoder:
             data, pts_seconds, duration_seconds = core.get_frame_at_pts(
                 self._decoder, seconds
             )
+            # 缓存成功解码的帧形状
+            if self._cached_frame_shape is None:
+                self._cached_frame_shape = data.shape
         except Exception as e:
             import torch
-            height = getattr(self.metadata, 'height', 1080)
-            width = getattr(self.metadata, 'width', 1920)
-            data = torch.zeros((3, height, width), dtype=torch.uint8)
+            data = self._create_blank_frame(num_frames=1)
             pts_seconds = torch.tensor(0.0, dtype=torch.float32)
             duration_seconds = torch.tensor(0.0, dtype=torch.float32)
         return Frame(
@@ -378,12 +417,13 @@ class VideoDecoder:
             data, pts_seconds, duration_seconds = core.get_frames_by_pts(
                 self._decoder, timestamps=seconds
             )
+            # 缓存成功解码的帧形状
+            if self._cached_frame_shape is None:
+                self._cached_frame_shape = data.shape
         except Exception as e:
             import torch
             num_frames = len(seconds)
-            height = getattr(self.metadata, 'height', 1080)
-            width = getattr(self.metadata, 'width', 1920)
-            data = torch.zeros((num_frames, 3, height, width), dtype=torch.uint8)
+            data = self._create_blank_frame(num_frames=num_frames)
             pts_seconds = torch.zeros(num_frames, dtype=torch.float32)
             duration_seconds = torch.zeros(num_frames, dtype=torch.float32)
         return FrameBatch(
@@ -431,14 +471,16 @@ class VideoDecoder:
                 start_seconds=start_seconds,
                 stop_seconds=stop_seconds,
             )
+            data, pts_seconds, duration_seconds = frames
+            # 缓存成功解码的帧形状
+            if self._cached_frame_shape is None:
+                self._cached_frame_shape = data.shape
         except Exception as e:
             import torch
             fps = getattr(self.metadata, 'average_fps', 30.0)
             duration = stop_seconds - start_seconds
             num_frames = max(1, int(duration * fps))
-            height = getattr(self.metadata, 'height', 1080)
-            width = getattr(self.metadata, 'width', 1920)
-            data = torch.zeros((num_frames, 3, height, width), dtype=torch.uint8)
+            data = self._create_blank_frame(num_frames=num_frames)
             pts_seconds = torch.zeros(num_frames, dtype=torch.float32)
             duration_seconds = torch.zeros(num_frames, dtype=torch.float32)
             frames = (data, pts_seconds, duration_seconds)
