@@ -1,3 +1,3 @@
-docker tag gr00t-dockerfile:v1 swr.cn-southwest-2.myhuawei.com/cloudrobo-test/mani_policy_groot_n16_ascend_test:v0.0.1
+docker tag gr00t-dockerfile:v1 swr.cn-southwest-2.myhuaweicloud.com/cloudrobo-test/mani_policy_groot_n16_ascend_test:v0.0.1
 
 docker login -u cn-southwest-2@HST3UKM1MU83WBNJNWNT -p 64b6289247ecbb46bb04389c585b84eb8b8640f0ddd869b782929fc331cdaef5 swr.cn-southwest-2.myhuaweicloud.com
