@@ -1,0 +1,48 @@
+FROM swr.cn-north-4.myhuaweicloud.com/atelier/pytorch_ascend:pytorch_2.6.0-cann_8.2.rc1-py_3.11-euler_2.10.11-aarch64-snt9b-20250908155148-2c423b4
+
+# 配置pip
+RUN mkdir -p /home/ma-user/.pip/
+COPY --chown=ma-user:ma-group context/pip.conf /home/ma-user/.pip/pip.conf
+
+# Prefer conda env python/pip and keep logs unbuffered
+ENV PATH=${ANACONDA_DIR}/envs/${ENV_NAME}/bin:${ANACONDA_DIR}/bin:$PATH \
+    PYTHONUNBUFFERED=1
+
+# Configure pip (root)
+USER root
+RUN mkdir -p /root/.pip/
+COPY context/pip.conf /root/.pip/pip.conf
+USER ma-user
+
+# Create environment
+RUN if [ ! -d "${ANACONDA_DIR}/envs/${ENV_NAME}" ]; then \
+        ${ANACONDA_DIR}/bin/conda create -y -n ${ENV_NAME} python=3.10; \
+    fi \
+    && ${ANACONDA_DIR}/bin/conda clean -a -y
+
+# Add project code into image (must build with repo root as context)
+WORKDIR /home/ma-user/univla
+RUN git clone https://github.com/moojink/dlimp_openvla.git /home/ma-user/univla/dlimp_openvla
+RUN git clone https://github.com/OpenDriveLab/UniVLA.git /home/ma-user/univla/UniVLA
+RUN git clone https://github.com/Lifelong-Robot-Learning/LIBERO.git /home/ma-user/univla/LIBERO
+COPY --chown=ma-user:ma-group univla_ascend /home/ma-user/univla/univla_ascend
+
+# Sync patched dependency metadata/files into UniVLA source tree
+RUN cp /home/ma-user/univla/univla_ascend/requirements.txt /home/ma-user/univla/UniVLA/ \
+    && cp /home/ma-user/univla/univla_ascend/pyproject.toml /home/ma-user/univla/UniVLA/ \
+    && cp /home/ma-user/univla/univla_ascend/setup.py /home/ma-user/univla/UniVLA/
+
+# Install dependencies in correct order (local dlimp first)
+WORKDIR /home/ma-user/univla
+RUN ${ANACONDA_DIR}/envs/${ENV_NAME}/bin/pip install --no-cache-dir -U "pip" "setuptools>=61" wheel \
+    && ${ANACONDA_DIR}/envs/${ENV_NAME}/bin/pip install --no-cache-dir lerobot==0.4.3 \
+    && ${ANACONDA_DIR}/envs/${ENV_NAME}/bin/pip install --no-cache-dir -e /home/ma-user/univla/LIBERO \
+    && ${ANACONDA_DIR}/envs/${ENV_NAME}/bin/pip install --no-cache-dir -e /home/ma-user/univla/dlimp_openvla \
+    && ${ANACONDA_DIR}/envs/${ENV_NAME}/bin/pip install --no-cache-dir -e /home/ma-user/univla/UniVLA \
+    && ${ANACONDA_DIR}/envs/${ENV_NAME}/bin/pip install /home/ma-user/univla/univla_ascend/ocms-*.whl \
+        && ${ANACONDA_DIR}/envs/${ENV_NAME}/bin/pip install tensorflow-metadata==1.17.3 \
+        && ${ANACONDA_DIR}/envs/${ENV_NAME}/bin/pip install protobuf==4.25.3 socket
+# Make `import patch` work from anywhere (scripts expect top-level module)
+ENV PYTHONPATH=/home/ma-user/univla/univla_ascend:${PYTHONPATH}
+
+WORKDIR /home/ma-user/univla/univla_ascend
